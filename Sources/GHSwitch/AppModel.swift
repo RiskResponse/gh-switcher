@@ -9,6 +9,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var gitIdentity: String?
     @Published private(set) var switching: String?
     @Published private(set) var claudeInstalled: Bool?
+    @Published private(set) var desktopInstalled: Bool?
     @Published var config: Config
     @Published var errorMessage: String?
 
@@ -140,6 +141,7 @@ final class AppModel: ObservableObject {
 
     func refreshClaudeStatus() {
         Task {
+            desktopInstalled = ClaudeDesktopIntegration.isInstalled()
             claudeInstalled = await Task.detached { ClaudeIntegration.isInstalled() }.value
         }
     }
@@ -158,6 +160,20 @@ final class AppModel: ObservableObject {
             }
             refreshClaudeStatus()
         }
+    }
+
+    func installDesktop() {
+        guard let cliPath else {
+            errorMessage = "The gh-switch CLI isn't bundled. Build the app with scripts/build-app.sh."
+            return
+        }
+        do {
+            try ClaudeDesktopIntegration.install(cliPath: cliPath)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        refreshClaudeStatus()
     }
 
     /// `gh auth login` is interactive, so run it in Terminal via a temporary .command file.

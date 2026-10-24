@@ -23,16 +23,20 @@ struct ManageView: View {
             }
 
             Section("Claude") {
-                LabeledContent("Claude Code MCP server") {
-                    switch model.claudeInstalled {
-                    case .some(true): Label("Installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                    case .some(false): Text("Not installed").foregroundStyle(.secondary)
-                    case .none: ProgressView().controlSize(.small)
+                LabeledContent("Claude Code") {
+                    HStack {
+                        InstallStatus(installed: model.claudeInstalled)
+                        Button(model.claudeInstalled == true ? "Reinstall" : "Install") { model.installClaude() }
                     }
                 }
-                Text("Once installed, ask Claude things like “switch to my acme GitHub account” or “which GitHub account am I using?”")
+                LabeledContent("Claude app (chat and Cowork)") {
+                    HStack {
+                        InstallStatus(installed: model.desktopInstalled)
+                        Button(model.desktopInstalled == true ? "Reinstall" : "Install") { model.installDesktop() }
+                    }
+                }
+                Text("Once installed, ask Claude things like “switch to my acme GitHub account” or “which GitHub account am I using?” Restart the Claude app after installing.")
                     .font(.callout).foregroundStyle(.secondary)
-                Button(model.claudeInstalled == true ? "Reinstall" : "Install for Claude Code") { model.installClaude() }
                 if let cli = model.cliPath {
                     Text("CLI: \(cli)").font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 }
@@ -56,6 +60,18 @@ struct ManageView: View {
             get: { model.config[keyPath: keyPath] },
             set: { model.config[keyPath: keyPath] = $0; model.saveConfig() }
         )
+    }
+}
+
+private struct InstallStatus: View {
+    let installed: Bool?
+
+    var body: some View {
+        switch installed {
+        case .some(true): Label("Installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .some(false): Text("Not installed").foregroundStyle(.secondary)
+        case .none: ProgressView().controlSize(.small)
+        }
     }
 }
 

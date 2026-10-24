@@ -10,6 +10,7 @@ usage: gh-switch [command]
   remove <account>    Log an account out of gh (exact login, label, or host/login)
   mcp                 Run as an MCP server over stdio (used by Claude)
   install-claude      Register the MCP server with Claude Code (user scope)
+  install-desktop     Register the MCP server with the Claude desktop app (chat and Cowork)
 """
 
 func fail(_ message: String) -> Never {
@@ -27,6 +28,10 @@ func describe(_ a: AccountInfo) -> String {
     let marker = a.active ? "*" : " "
     let label = a.label.map { " [\($0)]" } ?? ""
     return "\(marker) \(a.login)\(label)  \(a.host)  \(a.gitName) <\(a.gitEmail ?? "?")>"
+}
+
+var selfPath: String {
+    URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0]).resolvingSymlinksInPath().path
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -60,9 +65,12 @@ do {
     case "mcp":
         MCPServer(service: { try Switcher() }).run()
     case "install-claude":
-        let path = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0]).resolvingSymlinksInPath().path
-        try ClaudeIntegration.install(cliPath: path)
-        print("Registered MCP server `\(ClaudeIntegration.serverName)` -> \(path) mcp")
+        try ClaudeIntegration.install(cliPath: selfPath)
+        print("Registered MCP server `\(ClaudeIntegration.serverName)` -> \(selfPath) mcp")
+    case "install-desktop":
+        try ClaudeDesktopIntegration.install(cliPath: selfPath)
+        print("Added `\(ClaudeIntegration.serverName)` to \(ClaudeDesktopIntegration.configURL.path)")
+        print("Quit and reopen Claude to load it.")
     case "help", "-h", "--help":
         print(usage)
     default:

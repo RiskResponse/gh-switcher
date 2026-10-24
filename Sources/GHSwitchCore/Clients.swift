@@ -108,3 +108,43 @@ public enum ClaudeIntegration {
         guard result.ok else { throw GHSwitchError.commandFailed("claude mcp add", result.stderr + result.stdout) }
     }
 }
+
+/// Registers the `gh-switch mcp` server with the Claude desktop app, which Cowork also uses.
+public enum ClaudeDesktopIntegration {
+    public static var configURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json")
+    }
+
+    public static func isInstalled(configURL: URL = configURL) -> Bool {
+        guard let servers = (try? readConfig(configURL))?["mcpServers"] as? [String: Any] else { return false }
+        return servers[ClaudeIntegration.serverName] != nil
+    }
+
+    /// Adds or replaces our `mcpServers` entry, leaving the rest of the file alone. Requires the app to be installed.
+    public static func install(cliPath: String, configURL: URL = configURL) throws {
+        guard FileManager.default.fileExists(atPath: configURL.deletingLastPathComponent().path) else {
+            throw GHSwitchError.toolNotFound("Claude desktop app")
+        }
+        var config = try readConfig(configURL) ?? [:]
+        var servers = config["mcpServers"] as? [String: Any] ?? [:]
+        servers[ClaudeIntegration.serverName] = ["command": cliPath, "args": ["mcp"]]
+        config["mcpServers"] = servers
+
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            let backup = configURL.appendingPathExtension("gh-switch.bak")
+            try? FileManager.default.removeItem(at: backup)
+            try FileManager.default.copyItem(at: configURL, to: backup)
+        }
+        let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try (data + Data("\n".utf8)).write(to: configURL, options: .atomic)
+    }
+
+    private static func readConfig(_ url: URL) throws -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GHSwitchError.commandFailed("read \(url.lastPathComponent)", "not a JSON object")
+        }
+        return object
+    }
+}

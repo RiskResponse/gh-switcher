@@ -172,3 +172,27 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
         try Switcher.resolve("acme", accounts: accounts, config: config, allowPartial: false)
     }
 }
+
+@Test func desktopInstallPreservesOtherServers() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("claude_desktop_config.json")
+    try Data(#"{"mcpServers":{"other":{"command":"x"}},"preferences":{"a":1}}"#.utf8).write(to: url)
+
+    #expect(!ClaudeDesktopIntegration.isInstalled(configURL: url))
+    try ClaudeDesktopIntegration.install(cliPath: "/Apps/gh-switch", configURL: url)
+    #expect(ClaudeDesktopIntegration.isInstalled(configURL: url))
+
+    let config = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    let servers = config?["mcpServers"] as? [String: [String: Any]]
+    #expect(servers?["other"]?["command"] as? String == "x")
+    #expect(servers?["gh-switch"]?["command"] as? String == "/Apps/gh-switch")
+    #expect(servers?["gh-switch"]?["args"] as? [String] == ["mcp"])
+    #expect(config?["preferences"] != nil)
+    #expect(FileManager.default.fileExists(atPath: url.appendingPathExtension("gh-switch.bak").path))
+}
+
+@Test func desktopInstallRequiresApp() {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())/claude_desktop_config.json")
+    #expect(throws: GHSwitchError.self) { try ClaudeDesktopIntegration.install(cliPath: "/x", configURL: url) }
+}
