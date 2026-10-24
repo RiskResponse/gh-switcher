@@ -3,6 +3,8 @@ import Foundation
 /// Minimal MCP server (newline-delimited JSON-RPC over stdio) exposing account tools to Claude.
 public final class MCPServer {
     static let defaultProtocolVersion = "2025-06-18"
+    /// Versions whose initialize/tools handshake this server implements; others get our latest instead of an echo.
+    static let supportedProtocolVersions: Set = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
     private let service: () throws -> AccountService
 
@@ -27,8 +29,9 @@ public final class MCPServer {
 
         switch method {
         case "initialize":
+            let requested = params["protocolVersion"] as? String ?? ""
             return result(id, [
-                "protocolVersion": params["protocolVersion"] as? String ?? Self.defaultProtocolVersion,
+                "protocolVersion": Self.supportedProtocolVersions.contains(requested) ? requested : Self.defaultProtocolVersion,
                 "capabilities": ["tools": [:] as [String: Any]],
                 "serverInfo": ["name": "gh-switch", "version": "1.0.0"],
                 "instructions": "Use these tools to see and change which GitHub account the gh CLI and git use on this Mac. Switching is global: it affects every terminal and future git push/gh command.",

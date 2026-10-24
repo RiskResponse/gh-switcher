@@ -54,7 +54,8 @@ later, or use the buttons in **Manage Accounts…**.
   leave **Switch github account** on "Needs approval".
 
 `install-desktop` edits `~/Library/Application Support/Claude/claude_desktop_config.json`, leaving your other
-servers alone and saving the previous version as `claude_desktop_config.json.gh-switch.bak`.
+servers alone and saving the previous version as `claude_desktop_config.json.gh-switch-<timestamp>.bak` (the newest
+five are kept).
 
 ### 5. Verify
 
@@ -77,6 +78,7 @@ Then click the menu bar icon, and in Claude ask "which GitHub account am I using
   gh-switch switch acme    # login, label, or unique substring
   gh-switch current         # also shows which gh and git binaries are used
   gh-switch remove octo     # gh auth logout; exact login, label, or host/login; asks first (--yes to skip)
+                            # removing the active account moves gh and git to another account on that host
   gh-switch help
   ```
 - **Claude**: ask "switch to my work GitHub account" or "list my GitHub accounts".

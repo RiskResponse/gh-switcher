@@ -72,10 +72,16 @@ do {
         }
     case "remove", "rm":
         guard let query else { fail("remove needs an account, e.g. `gh-switch remove octo`") }
-        guard args.contains("--yes") || confirm("Log \(query) out of gh on this Mac?") else { fail("not removed") }
+        let prompt = "Log \(query) out of gh on this Mac? If it's the active account, gh and the global git identity switch to another account on the same host."
+        guard args.contains("--yes") || confirm(prompt) else { fail("not removed") }
         let outcome = try Switcher().remove(query)
         print("Removed \(outcome.removed.login) (\(outcome.removed.host))")
-        if let next = outcome.newActive { print("Now active: \(next.login) (\(next.host))") }
+        if let next = outcome.newActive {
+            print("Now active: \(next.login) (\(next.host))")
+            if outcome.gitIdentityUpdated {
+                print("git identity: \(next.gitName) <\(next.gitEmail ?? "unset: no email known, set one in GH Switch")>")
+            }
+        }
     case "mcp":
         MCPServer(service: { try Switcher() }).run()
     case "install-claude":
