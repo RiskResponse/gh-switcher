@@ -10,3 +10,7 @@ build/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Local audit output
+.gstack/
+audit-context/
