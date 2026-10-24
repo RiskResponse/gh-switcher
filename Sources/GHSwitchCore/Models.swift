@@ -5,6 +5,10 @@ public enum GHSwitchError: LocalizedError, Equatable {
     case commandFailed(String, String)
     case noMatch(String, available: [String])
     case ambiguous(String, candidates: [String])
+    case timedOut(String, seconds: Int)
+    case invalidConfig(String, reason: String)
+    case loginMismatch(expected: String, actual: String)
+    case partiallyRemoved(String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +20,26 @@ public enum GHSwitchError: LocalizedError, Equatable {
             return "No account matches \"\(query)\". Available: \(available.joined(separator: ", "))"
         case .ambiguous(let query, let candidates):
             return "\"\(query)\" matches several accounts: \(candidates.joined(separator: ", ")). Be more specific."
+        case .timedOut(let command, let seconds):
+            return "`\(command)` didn't finish within \(seconds)s and was stopped."
+        case .invalidConfig(let path, let reason):
+            return "Can't read \(path): \(reason). Fix or delete the file; gh-switch won't overwrite it."
+        case .loginMismatch(let expected, let actual):
+            return "GitHub returned user \(actual) for \(expected). Is GH_TOKEN set in your environment?"
+        case .partiallyRemoved(let login, let reason):
+            return "\(login) was logged out of gh, but finishing up failed: \(reason)"
+        }
+    }
+
+    /// A shorter message for the MCP client: no raw gh/git stderr, no list of every login.
+    public var mcpDescription: String {
+        switch self {
+        case .commandFailed(let command, _):
+            return "`\(command)` failed. Run the same `gh-switch` command in a terminal for details."
+        case .noMatch(let query, _):
+            return "No account exactly matches \"\(query)\". Call list_github_accounts and pass a login, label, or host/login."
+        default:
+            return errorDescription ?? "\(self)"
         }
     }
 }

@@ -20,13 +20,19 @@ public enum Shell {
         return nil
     }
 
-    public static func run(_ executable: String, _ args: [String], env: [String: String] = [:]) throws -> ShellResult {
+    /// Runs `executable` with `args`. Inherited variables named in `unsetting` are removed before `env` is applied.
+    /// The child is terminated if it runs longer than `timeout` seconds.
+    public static func run(
+        _ executable: String, _ args: [String], env: [String: String] = [:], unsetting: [String] = [],
+        timeout: TimeInterval = 30
+    ) throws -> ShellResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
         var environment = ProcessInfo.processInfo.environment
         let path = environment["PATH"].map { "\($0):" } ?? ""
         environment["PATH"] = path + extraPaths.joined(separator: ":")
+        for name in unsetting { environment[name] = nil }
         environment.merge(env) { _, new in new }
         process.environment = environment
 
@@ -38,6 +44,10 @@ public enum Shell {
         process.standardInput = FileHandle.nullDevice
         try process.run()
 
+        // Killing the child closes its pipes, so the reads below return.
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
         var errData = Data()
         let group = DispatchGroup()
         group.enter()
@@ -48,7 +58,11 @@ public enum Shell {
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         group.wait()
         process.waitUntilExit()
+        watchdog.cancel()
 
+        if process.terminationReason == .uncaughtSignal && process.terminationStatus == SIGTERM {
+            throw GHSwitchError.timedOut(([executable] + args).joined(separator: " "), seconds: Int(timeout))
+        }
         return ShellResult(
             status: process.terminationStatus,
             stdout: String(decoding: outData, as: UTF8.self),

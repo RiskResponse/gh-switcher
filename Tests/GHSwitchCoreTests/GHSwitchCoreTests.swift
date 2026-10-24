@@ -83,17 +83,21 @@ func resolvesQueries(query: String, expected: String) throws {
     config.updateGitIdentity = false
     config.profiles["github.com/octo"] = AccountProfile(label: "Personal")
     try store.save(config)
-    #expect(store.load() == config)
+    #expect(try store.load() == config)
 }
 
-struct FakeService: AccountService {
+final class FakeService: AccountService {
     let accounts: [AccountInfo]
+    var lastAllowPartial: Bool?
+
+    init(accounts: [AccountInfo]) { self.accounts = accounts }
 
     func listAccounts() throws -> [AccountInfo] { accounts }
     func currentStatus() throws -> CurrentStatus {
         CurrentStatus(account: accounts.first(where: \.active), gitName: "Octo", gitEmail: "o@x.com")
     }
-    func switchTo(_ query: String) throws -> SwitchOutcome {
+    func switchTo(_ query: String, allowPartial: Bool) throws -> SwitchOutcome {
+        lastAllowPartial = allowPartial
         guard let match = accounts.first(where: { $0.login == query }) else {
             throw GHSwitchError.noMatch(query, available: accounts.map(\.login))
         }
@@ -101,12 +105,15 @@ struct FakeService: AccountService {
     }
 }
 
-func makeServer() -> MCPServer {
-    let accounts = [
+func makeServer(_ service: FakeService = makeService()) -> MCPServer {
+    MCPServer(service: { service })
+}
+
+func makeService() -> FakeService {
+    FakeService(accounts: [
         AccountInfo(account: GHAccount(host: "github.com", login: "octo", active: true), profile: nil),
         AccountInfo(account: GHAccount(host: "github.com", login: "hubot", active: false), profile: AccountProfile(userID: 7)),
-    ]
-    return MCPServer(service: { FakeService(accounts: accounts) })
+    ])
 }
 
 func toolText(_ response: [String: Any]?) -> (String, Bool) {
@@ -135,7 +142,8 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
 }
 
 @Test func mcpSwitchTool() {
-    let server = makeServer()
+    let service = makeService()
+    let server = makeServer(service)
     let (text, isError) = toolText(server.handle([
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": ["name": "switch_github_account", "arguments": ["account": "hubot"]],
@@ -143,6 +151,7 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
     #expect(!isError)
     #expect(text.contains("Switched active GitHub account to hubot"))
     #expect(text.contains("7+hubot@users.noreply.github.com"))
+    #expect(service.lastAllowPartial == false)
 
     let (missing, missingIsError) = toolText(server.handle([
         "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": "switch_github_account", "arguments": [:]],
@@ -150,11 +159,19 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
     #expect(missingIsError)
     #expect(missing.contains("account"))
 
-    let (_, noMatchIsError) = toolText(server.handle([
+    let (noMatch, noMatchIsError) = toolText(server.handle([
         "jsonrpc": "2.0", "id": 4, "method": "tools/call",
         "params": ["name": "switch_github_account", "arguments": ["account": "nobody"]],
     ]))
     #expect(noMatchIsError)
+    #expect(noMatch.contains("list_github_accounts"))
+    #expect(!noMatch.contains("hubot"))
+}
+
+@Test func mcpSwitchIsMarkedDestructive() {
+    let switchTool = MCPServer.tools.first { $0["name"] as? String == "switch_github_account" }
+    let annotations = switchTool?["annotations"] as? [String: Any]
+    #expect(annotations?["destructiveHint"] as? Bool == true)
 }
 
 @Test func mcpUnknownMethodErrors() {
@@ -180,7 +197,7 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
     try Data(#"{"mcpServers":{"other":{"command":"x"}},"preferences":{"a":1}}"#.utf8).write(to: url)
 
     #expect(!ClaudeDesktopIntegration.isInstalled(configURL: url))
-    try ClaudeDesktopIntegration.install(cliPath: "/Apps/gh-switch", configURL: url)
+    let backup = try ClaudeDesktopIntegration.install(cliPath: "/Apps/gh-switch", configURL: url)
     #expect(ClaudeDesktopIntegration.isInstalled(configURL: url))
 
     let config = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
@@ -189,10 +206,126 @@ func toolText(_ response: [String: Any]?) -> (String, Bool) {
     #expect(servers?["gh-switch"]?["command"] as? String == "/Apps/gh-switch")
     #expect(servers?["gh-switch"]?["args"] as? [String] == ["mcp"])
     #expect(config?["preferences"] != nil)
-    #expect(FileManager.default.fileExists(atPath: url.appendingPathExtension("gh-switch.bak").path))
+    #expect(backup.map { FileManager.default.fileExists(atPath: $0.path) } == true)
 }
 
 @Test func desktopInstallRequiresApp() {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())/claude_desktop_config.json")
     #expect(throws: GHSwitchError.self) { try ClaudeDesktopIntegration.install(cliPath: "/x", configURL: url) }
+}
+
+@Test func emptyQueryNeverMatchesBlankLabel() throws {
+    var config = Config()
+    config.profiles["github.com/octocat"] = AccountProfile(label: "  ")
+    #expect(throws: GHSwitchError.self) {
+        try Switcher.resolve("@", accounts: try sampleAccounts(), config: config)
+    }
+}
+
+@Test func configStoreDefaultsOnlyWhenMissing() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID())/config.json")
+    #expect(try ConfigStore(url: url).load() == Config())
+
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(#"{"updateGitIdentity": "no"}"#.utf8).write(to: url)
+    #expect(throws: GHSwitchError.self) { try ConfigStore(url: url).load() }
+}
+
+@Test func desktopInstallWritesThroughSymlink() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let real = dir.appendingPathComponent("dotfiles.json")
+    try Data("{}".utf8).write(to: real)
+    let link = dir.appendingPathComponent("claude_desktop_config.json")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+    try ClaudeDesktopIntegration.install(cliPath: "/x", configURL: link)
+    #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == real.path)
+    #expect(ClaudeDesktopIntegration.isInstalled(configURL: real))
+}
+
+@Test func shellRunTimesOut() {
+    #expect(throws: GHSwitchError.self) { try Shell.run("/bin/sleep", ["5"], timeout: 0.3) }
+}
+
+@Test func shellRunUnsetsVariables() throws {
+    setenv("GHS_TEST_SECRET", "leak", 1)
+    let result = try Shell.run("/usr/bin/env", [], unsetting: ["GHS_TEST_SECRET"])
+    #expect(!result.stdout.contains("GHS_TEST_SECRET"))
+}
+
+/// Writes fake `gh` and `git` scripts. `gh` serves `status.json` and logs its calls; `git` logs its calls.
+struct FakeTools {
+    let dir: URL
+    var gh: String { dir.appendingPathComponent("gh").path }
+    var git: String { dir.appendingPathComponent("git").path }
+    var log: String { (try? String(contentsOf: dir.appendingPathComponent("calls.log"), encoding: .utf8)) ?? "" }
+
+    init(status: String) throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try status.write(to: dir.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
+        let d = dir.path
+        try write("gh", """
+        #!/bin/bash
+        echo "gh $* token=${GH_TOKEN:-}" >> '\(d)/calls.log'
+        case "$1 $2" in
+          "auth status") cat '\(d)/status.json' 2>/dev/null ;;
+          "auth token") if [ "$6" = "renamed" ]; then echo "stored-other"; else echo "stored-${6}"; fi ;;
+          "auth logout") rm '\(d)/status.json' ;;
+          "api --hostname") login="${GH_TOKEN#stored-}"; echo "{\\"id\\": 9, \\"login\\": \\"$login\\", \\"name\\": \\"N\\"}" ;;
+        esac
+        """)
+        try write("git", "#!/bin/bash\necho \"git $*\" >> '\(d)/calls.log'\n")
+    }
+
+    private func write(_ name: String, _ script: String) throws {
+        let url = dir.appendingPathComponent(name)
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    func switcher() throws -> Switcher {
+        try Switcher(gh: GHClient(path: gh), git: GitConfig(path: git), store: ConfigStore(url: dir.appendingPathComponent("config.json")))
+    }
+}
+
+let enterpriseStatus = """
+{"hosts":{"ghe.example.com":[{"state":"success","active":false,"host":"ghe.example.com","login":"octo"}],
+"github.com":[{"state":"success","active":true,"host":"github.com","login":"me"}]}}
+"""
+
+@Test func switchToEnterpriseUnsetsStaleEmail() throws {
+    let tools = try FakeTools(status: enterpriseStatus)
+    let outcome = try tools.switcher().switchTo("ghe.example.com/octo")
+    #expect(outcome.account.gitEmail == nil)
+    #expect(tools.log.contains("gh auth switch --hostname ghe.example.com --user octo"))
+    #expect(tools.log.contains("git config --global --unset user.email"))
+}
+
+@Test func ghIgnoresInheritedToken() throws {
+    setenv("GH_TOKEN", "stored-someone-else", 1)
+    defer { unsetenv("GH_TOKEN") }
+    let tools = try FakeTools(status: enterpriseStatus)
+    let user = try GHClient(path: tools.gh).user(host: "github.com", login: "me")
+    #expect(user.login == "me")
+    #expect(tools.log.contains("gh auth token --hostname github.com --user me token=\n"))
+}
+
+@Test func mismatchedApiLoginIsRejected() throws {
+    let tools = try FakeTools(status: enterpriseStatus)
+    // The fake hands "renamed" a token that belongs to "other".
+    #expect(throws: GHSwitchError.loginMismatch(expected: "renamed", actual: "other")) {
+        _ = try GHClient(path: tools.gh).user(host: "github.com", login: "renamed")
+    }
+    #expect(try GHClient(path: tools.gh).user(host: "github.com", login: "ME").login == "ME")
+}
+
+@Test func removeReportsPartialFailureAfterLogout() throws {
+    let tools = try FakeTools(status: enterpriseStatus)
+    // The fake logout deletes gh's state, so the follow-up `gh auth status` fails after the token is gone.
+    #expect(throws: GHSwitchError.partiallyRemoved("me", reason: "`gh auth status` failed: ")) {
+        _ = try tools.switcher().remove("me")
+    }
+    #expect(tools.log.contains("gh auth logout --hostname github.com --user me"))
 }
