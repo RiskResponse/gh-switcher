@@ -62,18 +62,22 @@ public final class MCPServer {
                 guard let query = args["account"] as? String, !query.trimmed.isEmpty else {
                     return text("Missing required argument `account`.", isError: true)
                 }
-                let outcome = try service.switchTo(query)
+                // Exact matches only: a model acting on injected text shouldn't reach an account by fragment.
+                let outcome = try service.switchTo(query, allowPartial: false)
                 let a = outcome.account
                 var message = outcome.alreadyActive
                     ? "\(a.login) (\(a.host)) was already the active GitHub account."
                     : "Switched active GitHub account to \(a.login) (\(a.host))."
                 if outcome.gitIdentityUpdated {
-                    message += " Global git identity: \(a.gitName) <\(a.gitEmail ?? "unchanged")>."
+                    message += a.gitEmail.map { " Global git identity: \(a.gitName) <\($0)>." }
+                        ?? " Global git user.name: \(a.gitName); user.email was unset because none is known for this account."
                 }
                 return text(message)
             default:
                 return text("Unknown tool: \(name)", isError: true)
             }
+        } catch let error as GHSwitchError {
+            return text(error.mcpDescription, isError: true)
         } catch {
             return text(error.localizedDescription, isError: true)
         }
@@ -94,25 +98,27 @@ public final class MCPServer {
             "name": "list_github_accounts",
             "description": "List the GitHub accounts logged in to the gh CLI, with labels, which one is active, and the git name/email each one uses.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-            "annotations": ["title": "List GitHub accounts", "readOnlyHint": true, "openWorldHint": false],
+            // Fetches names and avatars from the GitHub API for accounts it hasn't seen.
+            "annotations": ["title": "List GitHub accounts", "readOnlyHint": true, "openWorldHint": true],
         ],
         [
             "name": "get_active_github_account",
             "description": "Get the currently active GitHub account and the current global git user.name/user.email.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-            "annotations": ["title": "Get active GitHub account", "readOnlyHint": true, "openWorldHint": false],
+            "annotations": ["title": "Get active GitHub account", "readOnlyHint": true, "openWorldHint": true],
         ],
         [
             "name": "switch_github_account",
-            "description": "Switch the active GitHub account for gh and git (git uses gh as its credential helper) and update the global git identity. Accepts a login, a label, or a unique part of either.",
+            "description": "Switch the active GitHub account for gh and git (git uses gh as its credential helper) and update the global git identity. Requires an exact login, label, or host/login; call list_github_accounts first if unsure.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["account": ["type": "string", "description": "Login, label, or unique substring, e.g. \"acme\" or \"work\"."]],
+                "properties": ["account": ["type": "string", "description": "Exact login, label, or host/login, e.g. \"octocat-acme\" or \"work\"."]],
                 "required": ["account"],
             ],
             "annotations": [
-                "title": "Switch GitHub account", "readOnlyHint": false, "destructiveHint": false,
-                "idempotentHint": true, "openWorldHint": false,
+                // Destructive: it overwrites global gh and git state that every terminal uses.
+                "title": "Switch GitHub account", "readOnlyHint": false, "destructiveHint": true,
+                "idempotentHint": true, "openWorldHint": true,
             ],
         ],
     ]

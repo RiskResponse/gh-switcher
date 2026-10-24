@@ -42,7 +42,12 @@ final class AppModel: ObservableObject {
     }
 
     init() {
-        config = store.load()
+        do {
+            config = try store.load()
+        } catch {
+            config = Config()
+            errorMessage = error.localizedDescription
+        }
         // gh rewrites hosts.yml on `gh auth switch`, including switches made from the CLI or Claude.
         watcher = DirectoryWatcher(url: GHClient.configDirectory) { [weak self] in
             Task { @MainActor in self?.refresh() }
@@ -67,7 +72,7 @@ final class AppModel: ObservableObject {
                 }.value
                 self.accounts = accounts
                 self.gitIdentity = git
-                self.config = store.load()
+                self.config = try store.load()
                 self.errorMessage = nil
             } catch {
                 self.errorMessage = error.localizedDescription
@@ -112,7 +117,7 @@ final class AppModel: ObservableObject {
     func saveConfig() {
         do {
             // Merge onto disk so cached API details written by the CLI aren't lost.
-            var onDisk = store.load()
+            var onDisk = try store.load()
             onDisk.updateGitIdentity = config.updateGitIdentity
             onDisk.showLoginInMenuBar = config.showLoginInMenuBar
             for (key, profile) in config.profiles {
@@ -133,7 +138,7 @@ final class AppModel: ObservableObject {
         Task {
             _ = try? await Task.detached {
                 let switcher = try Switcher()
-                switcher.enrichProfiles(for: try switcher.gh.accounts(), force: true)
+                try switcher.enrichProfiles(for: try switcher.gh.accounts(), force: true)
             }.value
             refresh()
         }
@@ -169,7 +174,8 @@ final class AppModel: ObservableObject {
         }
         do {
             try ClaudeDesktopIntegration.install(cliPath: cliPath)
-            errorMessage = nil
+            errorMessage = ClaudeDesktopIntegration.isRunning
+                ? "Added to Claude's config. Quit and reopen Claude to load it." : nil
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -75,13 +75,14 @@ Then click the menu bar icon, and in Claude ask "which GitHub account am I using
   ```sh
   gh-switch                 # list accounts (* = active)
   gh-switch switch acme    # login, label, or unique substring
-  gh-switch current --json
-  gh-switch remove octo     # gh auth logout; exact login, label, or host/login only
+  gh-switch current         # also shows which gh and git binaries are used
+  gh-switch remove octo     # gh auth logout; exact login, label, or host/login; asks first (--yes to skip)
   gh-switch help
   ```
 - **Claude**: ask "switch to my work GitHub account" or "list my GitHub accounts".
   Tools: `list_github_accounts`, `get_active_github_account` (read-only), `switch_github_account`.
-  Removing accounts is deliberately not exposed to Claude.
+  Over MCP, switching needs an exact login, label, or host/login (no partial matches), and the tool is marked
+  destructive so Claude asks before running it. Removing accounts is deliberately not exposed to Claude.
 
 Switching is global: it affects every terminal and Claude session on the Mac. The app picks up switches made from
 the CLI or Claude by watching gh's config directory. Cowork runs commands in its own sandbox, so a switch changes
@@ -93,7 +94,13 @@ on GitHub. Add it back with `gh auth login`.
 ## Config
 
 `~/.config/gh-switch/config.json` stores labels, git identity overrides, and cached names and avatars from the
-GitHub API. If no git email is set, the account's `ID+login@users.noreply.github.com` address is used.
+GitHub API. If no git email is set, the account's `ID+login@users.noreply.github.com` address is used. On hosts
+other than github.com there's no noreply address, so switching to an account without a git email unsets
+`user.email` rather than leaving the previous account's address. If the file can't be parsed, gh-switch stops with
+an error instead of overwriting it.
+
+gh-switch ignores `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, and `GH_HOST`
+from your environment, so the stored login for each account is always the one used.
 
 ## Uninstall
 
@@ -121,3 +128,11 @@ make test   # swift-testing unit tests for parsing, matching, identity defaults,
 make run    # run the menu bar app unbundled
 make app    # build the app bundle into build/
 ```
+
+## Security
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+## License
+
+[MIT](LICENSE)

@@ -3,3 +3,14 @@ build/
 .swiftpm/
 *.xcodeproj
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Local audit output
+.gstack/
+audit-context/

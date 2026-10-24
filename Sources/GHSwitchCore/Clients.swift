@@ -8,9 +8,16 @@ public struct GHClient: Sendable {
         self.path = resolved
     }
 
+    /// Variables that make gh use a token other than the stored one for the requested account.
+    static let tokenOverrides = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST"]
+
+    private func run(_ args: [String], env: [String: String] = [:]) throws -> ShellResult {
+        try Shell.run(path, args, env: env, unsetting: Self.tokenOverrides)
+    }
+
     public func accounts() throws -> [GHAccount] {
         // Exits non-zero if any account has a problem, but still prints JSON.
-        let result = try Shell.run(path, ["auth", "status", "--json", "hosts"])
+        let result = try run(["auth", "status", "--json", "hosts"])
         guard !result.stdout.trimmed.isEmpty else {
             throw GHSwitchError.commandFailed("gh auth status", result.stderr)
         }
@@ -18,24 +25,30 @@ public struct GHClient: Sendable {
     }
 
     public func switchAccount(host: String, login: String) throws {
-        let result = try Shell.run(path, ["auth", "switch", "--hostname", host, "--user", login])
+        let result = try run(["auth", "switch", "--hostname", host, "--user", login])
         guard result.ok else { throw GHSwitchError.commandFailed("gh auth switch --user \(login)", result.stderr) }
     }
 
     public func logout(host: String, login: String) throws {
-        let result = try Shell.run(path, ["auth", "logout", "--hostname", host, "--user", login])
+        let result = try run(["auth", "logout", "--hostname", host, "--user", login])
         guard result.ok else { throw GHSwitchError.commandFailed("gh auth logout --user \(login)", result.stderr) }
     }
 
     public func user(host: String, login: String) throws -> GHUser {
-        let token = try Shell.run(path, ["auth", "token", "--hostname", host, "--user", login])
-        guard token.ok else { throw GHSwitchError.commandFailed("gh auth token --user \(login)", token.stderr) }
+        let token = try run(["auth", "token", "--hostname", host, "--user", login])
+        guard token.ok, !token.stdout.trimmed.isEmpty else {
+            throw GHSwitchError.commandFailed("gh auth token --user \(login)", token.stderr)
+        }
         let env = ["GH_TOKEN": token.stdout.trimmed, "GH_ENTERPRISE_TOKEN": token.stdout.trimmed, "GH_HOST": host]
-        let result = try Shell.run(path, ["api", "--hostname", host, "user"], env: env)
+        let result = try run(["api", "--hostname", host, "user"], env: env)
         guard result.ok else { throw GHSwitchError.commandFailed("gh api user", result.stderr) }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(GHUser.self, from: Data(result.stdout.utf8))
+        let user = try decoder.decode(GHUser.self, from: Data(result.stdout.utf8))
+        guard user.login.caseInsensitiveCompare(login) == .orderedSame else {
+            throw GHSwitchError.loginMismatch(expected: login, actual: user.login)
+        }
+        return user
     }
 
     public static var configDirectory: URL {
@@ -63,6 +76,14 @@ public struct GitConfig: Sendable {
         let result = try Shell.run(path, ["config", "--global", key, value])
         guard result.ok else { throw GHSwitchError.commandFailed("git config --global \(key)", result.stderr) }
     }
+
+    public func unset(_ key: String) throws {
+        let result = try Shell.run(path, ["config", "--global", "--unset", key])
+        // Exit 5 means the key wasn't set.
+        guard result.ok || result.status == 5 else {
+            throw GHSwitchError.commandFailed("git config --global --unset \(key)", result.stderr)
+        }
+    }
 }
 
 public struct ConfigStore: Sendable {
@@ -78,9 +99,22 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    public func load() -> Config {
-        guard let data = try? Data(contentsOf: url) else { return Config() }
-        return (try? JSONDecoder().decode(Config.self, from: data)) ?? Config()
+    /// Returns defaults only when the file doesn't exist. An unreadable or invalid file throws, so callers never
+    /// act on, or save over, defaults the user didn't choose.
+    public func load() throws -> Config {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return Config()
+        } catch {
+            throw GHSwitchError.invalidConfig(url.path, reason: error.localizedDescription)
+        }
+        do {
+            return try JSONDecoder().decode(Config.self, from: data)
+        } catch {
+            throw GHSwitchError.invalidConfig(url.path, reason: "not valid gh-switch JSON")
+        }
     }
 
     public func save(_ config: Config) throws {
@@ -121,27 +155,46 @@ public enum ClaudeDesktopIntegration {
         return servers[ClaudeIntegration.serverName] != nil
     }
 
+    /// Claude rewrites its config when it quits, which can drop an entry added while it was running.
+    public static var isRunning: Bool {
+        (try? Shell.run("/usr/bin/pgrep", ["-x", "Claude"]))?.ok ?? false
+    }
+
     /// Adds or replaces our `mcpServers` entry, leaving the rest of the file alone. Requires the app to be installed.
-    public static func install(cliPath: String, configURL: URL = configURL) throws {
+    /// Returns the backup of the previous file, if there was one.
+    @discardableResult
+    public static func install(cliPath: String, configURL: URL = configURL) throws -> URL? {
         guard FileManager.default.fileExists(atPath: configURL.deletingLastPathComponent().path) else {
             throw GHSwitchError.toolNotFound("Claude desktop app")
         }
-        var config = try readConfig(configURL) ?? [:]
+        // Write through a symlink (e.g. a dotfiles-managed config) instead of replacing it.
+        let target = configURL.resolvingSymlinksInPath()
+        let existing = try readConfig(target)
+        var config = existing ?? [:]
         var servers = config["mcpServers"] as? [String: Any] ?? [:]
         servers[ClaudeIntegration.serverName] = ["command": cliPath, "args": ["mcp"]]
         config["mcpServers"] = servers
 
-        if FileManager.default.fileExists(atPath: configURL.path) {
-            let backup = configURL.appendingPathExtension("gh-switch.bak")
-            try? FileManager.default.removeItem(at: backup)
-            try FileManager.default.copyItem(at: configURL, to: backup)
+        var backup: URL?
+        if existing != nil {
+            let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withYear, .withMonth, .withDay, .withTime])
+            let url = target.appendingPathExtension("gh-switch-\(stamp).bak")
+            try FileManager.default.copyItem(at: target, to: url)
+            backup = url
         }
         let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try (data + Data("\n".utf8)).write(to: configURL, options: .atomic)
+        try (data + Data("\n".utf8)).write(to: target, options: .atomic)
+        return backup
     }
 
+    /// Returns nil only when the file doesn't exist.
     private static func readConfig(_ url: URL) throws -> [String: Any]? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        }
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw GHSwitchError.commandFailed("read \(url.lastPathComponent)", "not a JSON object")
         }

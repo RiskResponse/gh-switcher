@@ -130,10 +130,14 @@ private struct AccountEditor: View {
     }
 
     private func save() {
+        func cleaned(_ value: String) -> String? {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
         model.updateProfile(account.key) {
-            $0.label = label.isEmpty ? nil : label
-            $0.gitName = gitName.isEmpty ? nil : gitName
-            $0.gitEmail = gitEmail.isEmpty ? nil : gitEmail
+            $0.label = cleaned(label)
+            $0.gitName = cleaned(gitName)
+            $0.gitEmail = cleaned(gitEmail)
         }
     }
 }
