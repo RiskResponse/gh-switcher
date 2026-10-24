@@ -261,7 +261,7 @@ struct FakeTools {
     var git: String { dir.appendingPathComponent("git").path }
     var log: String { (try? String(contentsOf: dir.appendingPathComponent("calls.log"), encoding: .utf8)) ?? "" }
 
-    init(status: String) throws {
+    init(status: String, gitFails: Bool = false) throws {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try status.write(to: dir.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
@@ -276,7 +276,7 @@ struct FakeTools {
           "api --hostname") login="${GH_TOKEN#stored-}"; echo "{\\"id\\": 9, \\"login\\": \\"$login\\", \\"name\\": \\"N\\"}" ;;
         esac
         """)
-        try write("git", "#!/bin/bash\necho \"git $*\" >> '\(d)/calls.log'\n")
+        try write("git", "#!/bin/bash\necho \"git $*\" >> '\(d)/calls.log'\n" + (gitFails ? "echo locked >&2; exit 1\n" : ""))
     }
 
     private func write(_ name: String, _ script: String) throws {
@@ -328,4 +328,82 @@ let enterpriseStatus = """
         _ = try tools.switcher().remove("me")
     }
     #expect(tools.log.contains("gh auth logout --hostname github.com --user me"))
+}
+
+func tempDir() throws -> URL {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+@Test func concurrentConfigUpdatesAreNotLost() throws {
+    let store = ConfigStore(url: try tempDir().appendingPathComponent("config.json"))
+    DispatchQueue.concurrentPerform(iterations: 20) { i in
+        _ = try? store.update { $0.profiles["github.com/user\(i)"] = AccountProfile(label: "\(i)") }
+    }
+    #expect(try store.load().profiles.count == 20)
+}
+
+@Test func configStoreSavesThroughSymlink() throws {
+    let dir = try tempDir()
+    let real = dir.appendingPathComponent("dotfiles.json")
+    try Data("{}".utf8).write(to: real)
+    let link = dir.appendingPathComponent("config.json")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+    try ConfigStore(url: link).update { $0.showLoginInMenuBar = false }
+    #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == real.path)
+    #expect(try ConfigStore(url: real).load().showLoginInMenuBar == false)
+}
+
+@Test(arguments: ["", "relative/dir"])
+func nonAbsoluteXDGConfigHomeIsIgnored(value: String) {
+    let url = ConfigStore(environment: ["XDG_CONFIG_HOME": value]).url
+    #expect(url.path == NSHomeDirectory() + "/.config/gh-switch/config.json")
+}
+
+@Test func gitIdentityIsTrimmed() {
+    let info = AccountInfo(account: GHAccount(host: "github.com", login: "me", active: true),
+                           profile: AccountProfile(label: " Work ", gitName: " Me ", gitEmail: "  me@example.com "))
+    #expect(info.label == "Work")
+    #expect(info.gitName == "Me")
+    #expect(info.gitEmail == "me@example.com")
+}
+
+@Test func shellRunKillsChildThatIgnoresSigterm() {
+    let start = Date()
+    #expect(throws: GHSwitchError.self) {
+        try Shell.run("/bin/sh", ["-c", "trap '' TERM; while :; do :; done"], timeout: 0.3)
+    }
+    #expect(Date().timeIntervalSince(start) < Shell.killGrace + 3)
+}
+
+@Test func mcpAmbiguousErrorOmitsCandidates() {
+    let message = GHSwitchError.ambiguous("work", candidates: ["github.com/alice", "github.com/bob"]).mcpDescription
+    #expect(!message.contains("alice"))
+}
+
+@Test func mcpInitializeAnswersUnsupportedVersionWithLatest() {
+    let response = makeServer().handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2099-01-01"]])
+    let result = response?["result"] as? [String: Any]
+    #expect(result?["protocolVersion"] as? String == MCPServer.defaultProtocolVersion)
+}
+
+@Test func switchReportsPartialWhenGitFails() throws {
+    let tools = try FakeTools(status: enterpriseStatus, gitFails: true)
+    do {
+        _ = try tools.switcher().switchTo("ghe.example.com/octo")
+        Issue.record("expected an error")
+    } catch GHSwitchError.partiallySwitched(let login, _) {
+        #expect(login == "octo")
+    }
+}
+
+@Test func desktopInstallKeepsOnlyRecentBackups() throws {
+    let dir = try tempDir()
+    let config = dir.appendingPathComponent("claude_desktop_config.json")
+    try Data("{}".utf8).write(to: config)
+    for _ in 0..<8 { try ClaudeDesktopIntegration.install(cliPath: "/x", configURL: config) }
+    let backups = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".bak") }
+    #expect(backups.count == ClaudeDesktopIntegration.backupsKept)
 }

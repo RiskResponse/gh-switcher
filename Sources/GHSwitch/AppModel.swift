@@ -116,18 +116,18 @@ final class AppModel: ObservableObject {
 
     func saveConfig() {
         do {
-            // Merge onto disk so cached API details written by the CLI aren't lost.
-            var onDisk = try store.load()
-            onDisk.updateGitIdentity = config.updateGitIdentity
-            onDisk.showLoginInMenuBar = config.showLoginInMenuBar
-            for (key, profile) in config.profiles {
-                var merged = onDisk.profiles[key] ?? profile
-                merged.label = profile.label
-                merged.gitName = profile.gitName
-                merged.gitEmail = profile.gitEmail
-                onDisk.profiles[key] = merged
+            // Merge onto disk, under the config lock, so cached API details written by the CLI aren't lost.
+            try store.update { [config] onDisk in
+                onDisk.updateGitIdentity = config.updateGitIdentity
+                onDisk.showLoginInMenuBar = config.showLoginInMenuBar
+                for (key, profile) in config.profiles {
+                    var merged = onDisk.profiles[key] ?? profile
+                    merged.label = profile.label
+                    merged.gitName = profile.gitName
+                    merged.gitEmail = profile.gitEmail
+                    onDisk.profiles[key] = merged
+                }
             }
-            try store.save(onDisk)
             refresh()
         } catch {
             errorMessage = error.localizedDescription

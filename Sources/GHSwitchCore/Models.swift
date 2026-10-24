@@ -9,6 +9,7 @@ public enum GHSwitchError: LocalizedError, Equatable {
     case invalidConfig(String, reason: String)
     case loginMismatch(expected: String, actual: String)
     case partiallyRemoved(String, reason: String)
+    case partiallySwitched(String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -28,18 +29,34 @@ public enum GHSwitchError: LocalizedError, Equatable {
             return "GitHub returned user \(actual) for \(expected). Is GH_TOKEN set in your environment?"
         case .partiallyRemoved(let login, let reason):
             return "\(login) was logged out of gh, but finishing up failed: \(reason)"
+        case .partiallySwitched(let login, let reason):
+            return "gh switched to \(login), but updating the global git identity failed, so git may still use the previous account: \(reason)"
         }
     }
 
     /// A shorter message for the MCP client: no raw gh/git stderr, no list of every login.
+    /// Every case is listed so a new one can't fall back to `errorDescription` by accident.
     public var mcpDescription: String {
+        let details = "Run the same `gh-switch` command in a terminal for details."
         switch self {
+        case .toolNotFound:
+            return errorDescription ?? ""
         case .commandFailed(let command, _):
-            return "`\(command)` failed. Run the same `gh-switch` command in a terminal for details."
+            return "`\(command)` failed. \(details)"
         case .noMatch(let query, _):
             return "No account exactly matches \"\(query)\". Call list_github_accounts and pass a login, label, or host/login."
-        default:
-            return errorDescription ?? "\(self)"
+        case .ambiguous(let query, _):
+            return "\"\(query)\" matches several accounts. Call list_github_accounts and pass a host/login."
+        case .timedOut:
+            return "A gh or git command didn't finish in time and was stopped. \(details)"
+        case .invalidConfig:
+            return "The gh-switch config file can't be read. \(details)"
+        case .loginMismatch(let expected, _):
+            return "GitHub returned a different user for \(expected). \(details)"
+        case .partiallyRemoved(let login, _):
+            return "\(login) was logged out of gh, but finishing up failed. \(details)"
+        case .partiallySwitched(let login, _):
+            return "gh switched to \(login), but updating the global git identity failed, so git may still use the previous account. \(details)"
         }
     }
 }
@@ -148,5 +165,5 @@ public struct AccountInfo: Codable, Hashable, Sendable, Identifiable {
 }
 
 extension String {
-    var nilIfBlank: String? { trimmed.isEmpty ? nil : self }
+    var nilIfBlank: String? { trimmed.isEmpty ? nil : trimmed }
 }

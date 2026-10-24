@@ -10,6 +10,7 @@ public struct ShellResult: Sendable {
 public enum Shell {
     /// GUI apps launch with a minimal PATH, so common install locations are appended.
     static let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "\(NSHomeDirectory())/.local/bin"]
+    static let killGrace: TimeInterval = 2
 
     public static func find(_ name: String) -> String? {
         let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
@@ -44,8 +45,17 @@ public enum Shell {
         process.standardInput = FileHandle.nullDevice
         try process.run()
 
-        // Killing the child closes its pipes, so the reads below return.
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        // Killing the child closes its pipes, so the reads below return. SIGKILL follows if SIGTERM is ignored.
+        let timedOut = TimeoutFlag()
+        let pid = process.processIdentifier
+        let watchdog = DispatchWorkItem {
+            guard process.isRunning else { return }
+            timedOut.set()
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + killGrace) {
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
 
         var errData = Data()
@@ -60,7 +70,7 @@ public enum Shell {
         process.waitUntilExit()
         watchdog.cancel()
 
-        if process.terminationReason == .uncaughtSignal && process.terminationStatus == SIGTERM {
+        if timedOut.isSet {
             throw GHSwitchError.timedOut(([executable] + args).joined(separator: " "), seconds: Int(timeout))
         }
         return ShellResult(
@@ -69,6 +79,13 @@ public enum Shell {
             stderr: String(decoding: errData, as: UTF8.self)
         )
     }
+}
+
+private final class TimeoutFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
 }
 
 extension String {

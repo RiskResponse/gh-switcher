@@ -15,6 +15,7 @@ public struct SwitchOutcome: Codable, Sendable {
 public struct RemoveOutcome: Codable, Sendable {
     public let removed: AccountInfo
     public let newActive: AccountInfo?
+    public let gitIdentityUpdated: Bool
 }
 
 public protocol AccountService {
@@ -63,9 +64,13 @@ public struct Switcher: AccountService {
         let info = AccountInfo(account: switched, profile: config.profiles[target.key])
 
         if config.updateGitIdentity {
-            try git.set("user.name", info.gitName)
-            // Leaving the previous account's email would pair this account's name with someone else's address.
-            if let email = info.gitEmail { try git.set("user.email", email) } else { try git.unset("user.email") }
+            do {
+                try git.set("user.name", info.gitName)
+                // Leaving the previous account's email would pair this account's name with someone else's address.
+                if let email = info.gitEmail { try git.set("user.email", email) } else { try git.unset("user.email") }
+            } catch where !target.active {
+                throw GHSwitchError.partiallySwitched(target.login, reason: error.localizedDescription)
+            }
         }
         return SwitchOutcome(account: info, alreadyActive: target.active, gitIdentityUpdated: config.updateGitIdentity)
     }
@@ -78,17 +83,20 @@ public struct Switcher: AccountService {
 
         // The token is gone now, so report any later failure as a partial removal rather than a plain error.
         do {
-            var config = try store.load()
-            let removed = AccountInfo(account: target, profile: config.profiles[target.key])
-            config.profiles[target.key] = nil
-            try store.save(config)
+            var profile: AccountProfile?
+            try store.update { config in
+                profile = config.profiles[target.key]
+                config.profiles[target.key] = nil
+            }
+            let removed = AccountInfo(account: target, profile: profile)
 
             // gh activates another account on the same host when the active one logs out; bring the git identity along.
             guard target.active,
                   let next = try gh.accounts().first(where: { $0.active && $0.host == target.host }) else {
-                return RemoveOutcome(removed: removed, newActive: nil)
+                return RemoveOutcome(removed: removed, newActive: nil, gitIdentityUpdated: false)
             }
-            return RemoveOutcome(removed: removed, newActive: try switchTo(next.key, allowPartial: false).account)
+            let outcome = try switchTo(next.key, allowPartial: false)
+            return RemoveOutcome(removed: removed, newActive: outcome.account, gitIdentityUpdated: outcome.gitIdentityUpdated)
         } catch {
             throw GHSwitchError.partiallyRemoved(target.login, reason: error.localizedDescription)
         }
@@ -97,19 +105,22 @@ public struct Switcher: AccountService {
     /// Fetches name/avatar/id from the GitHub API for accounts not yet cached. Best effort.
     @discardableResult
     public func enrichProfiles(for accounts: [GHAccount], force: Bool = false) throws -> Config {
-        var config = try store.load()
-        var changed = false
+        let config = try store.load()
+        // The API calls are slow, so make them before taking the config lock, then apply only the fetched fields.
+        var users: [String: GHUser] = [:]
         for account in accounts where force || config.profiles[account.key]?.userID == nil {
-            guard let user = try? gh.user(host: account.host, login: account.login) else { continue }
-            var profile = config.profiles[account.key] ?? AccountProfile()
-            profile.userID = user.id
-            profile.displayName = user.name
-            profile.avatarURL = user.avatarUrl
-            config.profiles[account.key] = profile
-            changed = true
+            users[account.key] = try? gh.user(host: account.host, login: account.login)
         }
-        if changed { try? store.save(config) }
-        return config
+        guard !users.isEmpty else { return config }
+        return (try? store.update { config in
+            for (key, user) in users {
+                var profile = config.profiles[key] ?? AccountProfile()
+                profile.userID = user.id
+                profile.displayName = user.name
+                profile.avatarURL = user.avatarUrl
+                config.profiles[key] = profile
+            }
+        }) ?? config
     }
 
     /// Matches by exact login, label or `host/login` first, then by unique substring.

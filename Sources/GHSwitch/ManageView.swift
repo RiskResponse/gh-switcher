@@ -97,7 +97,8 @@ private struct AccountEditor: View {
             .confirmationDialog("Remove \(account.login)?", isPresented: $confirmingRemove) {
                 Button("Remove", role: .destructive) { model.remove(account) }
             } message: {
-                Text("Logs \(account.login) out of the gh CLI on this Mac. The token isn’t revoked on \(account.host); run `gh auth login` to add it back.")
+                Text("Logs \(account.login) out of the gh CLI on this Mac. The token isn’t revoked on \(account.host); run `gh auth login` to add it back."
+                    + (account.active ? " gh and the global git identity will switch to another account on \(account.host)." : ""))
             }
         } label: {
             HStack(spacing: 10) {

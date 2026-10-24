@@ -53,10 +53,16 @@ public struct GHClient: Sendable {
 
     public static var configDirectory: URL {
         let env = ProcessInfo.processInfo.environment
-        if let dir = env["GH_CONFIG_DIR"] { return URL(fileURLWithPath: dir) }
-        if let xdg = env["XDG_CONFIG_HOME"] { return URL(fileURLWithPath: xdg).appendingPathComponent("gh") }
+        if let dir = absolutePath(env["GH_CONFIG_DIR"]) { return URL(fileURLWithPath: dir) }
+        if let xdg = absolutePath(env["XDG_CONFIG_HOME"]) { return URL(fileURLWithPath: xdg).appendingPathComponent("gh") }
         return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".config/gh")
     }
+}
+
+/// Per the XDG spec, an empty or relative directory variable is ignored rather than resolved against the cwd.
+func absolutePath(_ value: String?) -> String? {
+    guard let value, value.hasPrefix("/") else { return nil }
+    return value
 }
 
 public struct GitConfig: Sendable {
@@ -89,14 +95,33 @@ public struct GitConfig: Sendable {
 public struct ConfigStore: Sendable {
     public let url: URL
 
-    public init(url: URL? = nil) {
+    public init(url: URL? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
         if let url {
             self.url = url
         } else {
-            let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
+            let base = absolutePath(environment["XDG_CONFIG_HOME"]).map { URL(fileURLWithPath: $0) }
                 ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".config")
             self.url = base.appendingPathComponent("gh-switch/config.json")
         }
+    }
+
+    /// Loads, changes and saves the config while holding an exclusive lock, so the app, CLI and MCP server
+    /// don't overwrite each other's changes. Keep slow work (subprocesses, network) out of `change`.
+    @discardableResult
+    public func update(_ change: (inout Config) throws -> Void) throws -> Config {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lockPath = url.resolvingSymlinksInPath().path + ".lock"
+        let fd = open(lockPath, O_RDWR | O_CREAT, 0o600)
+        guard fd >= 0 else { throw GHSwitchError.invalidConfig(lockPath, reason: String(cString: strerror(errno))) }
+        defer { close(fd) }
+        flock(fd, LOCK_EX)
+        defer { flock(fd, LOCK_UN) }
+
+        var config = try load()
+        let before = config
+        try change(&config)
+        if config != before { try save(config) }
+        return config
     }
 
     /// Returns defaults only when the file doesn't exist. An unreadable or invalid file throws, so callers never
@@ -121,7 +146,8 @@ public struct ConfigStore: Sendable {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(config).write(to: url, options: .atomic)
+        // Write through a symlink (e.g. a dotfiles-managed config) instead of replacing it.
+        try encoder.encode(config).write(to: url.resolvingSymlinksInPath(), options: .atomic)
     }
 }
 
@@ -177,14 +203,29 @@ public enum ClaudeDesktopIntegration {
 
         var backup: URL?
         if existing != nil {
-            let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withYear, .withMonth, .withDay, .withTime])
+            let stamp = ISO8601DateFormatter.string(
+                from: Date(), timeZone: .current, formatOptions: [.withYear, .withMonth, .withDay, .withTime, .withFractionalSeconds])
             let url = target.appendingPathExtension("gh-switch-\(stamp).bak")
             try FileManager.default.copyItem(at: target, to: url)
             backup = url
+            pruneBackups(of: target)
         }
         let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         try (data + Data("\n".utf8)).write(to: target, options: .atomic)
         return backup
+    }
+
+    static let backupsKept = 5
+
+    /// Each backup is a full copy of the config, which can hold other servers' secrets, so keep only the newest few.
+    private static func pruneBackups(of target: URL) {
+        let dir = target.deletingLastPathComponent()
+        let prefix = target.lastPathComponent + ".gh-switch-"
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let backups = names.filter { $0.hasPrefix(prefix) && $0.hasSuffix(".bak") }.sorted()
+        for name in backups.dropLast(backupsKept) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     /// Returns nil only when the file doesn't exist.
